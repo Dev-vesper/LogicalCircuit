@@ -107,11 +107,23 @@ let get_input t id =
 
 type color = White | Grey | Black
 
-let simulate t =
+(* The wire list of a gate is a prefix of its ports (connect enforces the capacity), so
+   the ports beyond it are padded with [None]: a port with no wire drives [Unknown]. *)
+let ports g wires =
+  let rec go n wires =
+    if n = 0 then []
+    else match wires with
+    | w :: rest -> Some w :: go (n - 1) rest
+    | [] -> None :: go (n - 1) []
+  in
+  go (Gate.arity g) wires
+
+let simulate_partial t =
   let count = Dynarray.length t.nodes in
-  let values = Array.make count false in
+  let values = Array.make count Gate.Unknown in
   let colors = Array.make count White in
   let path = ref [] in
+  let cycle = ref [] in
   let cycle_from id =
     let rec take acc = function
       | [] -> List.rev acc
@@ -121,39 +133,48 @@ let simulate t =
   in
   let rec visit id =
     match colors.(id) with
-    | Black -> Ok ()
-    | Grey -> Error (Cyclic (cycle_from id))
-    | White -> (
+    | Black -> ()
+    | Grey -> if !cycle = [] then cycle := cycle_from id
+    | White ->
         let node = Dynarray.get t.nodes id in
         colors.(id) <- Grey;
         path := id :: !path;
-        match visit_wires node.wires with
-        | Error e -> Error e
-        | Ok () ->
-            let wired =
-              match node.kind with
-              | Input -> true
-              | Gate g -> List.length node.wires = Gate.arity g
-            in
-            if not wired then Error (Incomplete id)
-            else begin
-              values.(id) <-
-                (match node.kind with
-                | Input -> node.input
-                | Gate g -> Gate.eval g (List.map (Array.get values) node.wires));
-              colors.(id) <- Black;
-              path := List.tl !path;
-              Ok ()
-            end)
-  and visit_wires = function
-    | [] -> Ok ()
-    | w :: rest -> ( match visit w with Ok () -> visit_wires rest | Error e -> Error e)
+        List.iter visit node.wires;
+        values.(id) <-
+          (match node.kind with
+          | Input -> Gate.of_bool node.input
+          | Gate g ->
+              Gate.eval3 g
+                (List.map
+                   (function Some w -> values.(w) | None -> Gate.Unknown)
+                   (ports g node.wires)));
+        colors.(id) <- Black;
+        path := List.tl !path
   in
-  let rec loop id =
-    if id >= count then Ok values
-    else match visit id with Ok () -> loop (id + 1) | Error e -> Error e
+  for id = 0 to count - 1 do visit id done;
+  (values, !cycle)
+
+let first_unwired t =
+  let count = Dynarray.length t.nodes in
+  let rec go id =
+    if id >= count then None
+    else
+      let node = Dynarray.get t.nodes id in
+      match node.kind with
+      | Input -> go (id + 1)
+      | Gate g ->
+          if List.length node.wires < Gate.arity g then Some id else go (id + 1)
   in
-  loop 0
+  go 0
+
+let simulate t =
+  let values, cycle = simulate_partial t in
+  match cycle with
+  | _ :: _ -> Error (Cyclic cycle)
+  | [] -> (
+      match first_unwired t with
+      | Some id -> Error (Incomplete id)
+      | None -> Ok (Array.map Gate.to_bool values))
 
 let validate t = Result.map ignore (simulate t)
 

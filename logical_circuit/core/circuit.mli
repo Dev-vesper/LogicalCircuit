@@ -62,13 +62,19 @@ val get_input : t -> node_id -> bool option
 val validate : t -> (unit, error) result
 (** {!simulate} with the values discarded. *)
 
+val simulate_partial : t -> Gate.value array * node_id list
+(** The value of every node, indexed by node id, without ever failing. A port with no
+    wire drives {!Gate.Unknown}, and so does a gate fed by one; the gates still
+    short-circuit on a decisive level, so an [And] with a wired [Low] is [Low] even
+    while its other port is empty. The second component lists the nodes of a feedback
+    cycle in wire order, or [][] when the circuit is acyclic, so an editor can mark the
+    offending wires instead of showing nothing. Costs O(V+E): the same single
+    depth-first post-order pass as {!simulate}. *)
+
 val simulate : t -> (bool array, error) result
-(** The value of every node, indexed by node id. Costs O(V+E): one depth-first
-    post-order pass with three-colour marking, which visits only the cone of influence
-    of the nodes it needs. Hitting a node that is still in progress is a cycle and
-    yields {!Cyclic} carrying that cycle. A gate with unwired ports has no defined
-    value and yields {!Incomplete}. Recursion depth equals the longest path, which only
-    matters for pathologically deep circuits. *)
+(** The value of every node of a circuit that is fully wired and acyclic. Reports
+    {!Cyclic} if there is a feedback cycle, otherwise {!Incomplete} at a gate with an
+    unwired port; when both are present the cycle is reported. *)
 
 val eval : t -> node_id -> bool
 (** {!simulate}, then index.
