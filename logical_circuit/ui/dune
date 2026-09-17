@@ -1,0 +1,9 @@
+(library
+ (name ui)
+ (modules doc shapes canvas buttons menu truth_panel ui_window)
+ (libraries logic lablgtk3 cairo2))
+
+(executable
+ (name ui_main)
+ (modules ui_main)
+ (libraries ui lablgtk3))
