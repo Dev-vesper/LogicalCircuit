@@ -87,9 +87,9 @@ locally with `dune test --force` when it is present.
 - Drag from an output port to wire two nodes: the loose end settles on the nearest dot
   as you move, and snaps onto the input port under the pointer, which lights up. The
   wire is politely refused if the port is already taken.
-- Wires route themselves as clean right angles between the ports. To lay one out
-  yourself, drag any segment of it: the segment follows the mouse, its bends land on the
-  dots, and the ends stay on the ports.
+- Wires take the nearest right-angled path between their ports. To lay one out yourself,
+  hover it so its bends show as handles: drag a bend to move that point, or a segment to
+  slide it. Every point steps dot by dot, and the wire keeps its right angles.
 - Click a wire to select it (its bends show as handles), then press `Delete` (or
   right-click) to remove it. Right-click a node to delete it together with its wires.
 - `Escape` cancels a wire drag and returns to `Select`.
