@@ -23,20 +23,16 @@ let output_port = function
 
 let snap v = Float.round (v /. cell) *. cell
 
+(* The nearest right-angled path, never a detour: a straight run when the two ports face
+   each other, one dogleg in the space between them when there is room, and otherwise a
+   single dogleg tucked just before the target — the short way round, whatever
+   direction the target sits in. *)
 let route ~sx ~sy ~dx ~dy =
-  let off = cell in
-  if dy = sy && dx >= sx then []
-  else if dx >= sx +. (2. *. off) then
-    let mid = Float.max (sx +. off) (Float.min (dx -. off) (snap ((sx +. dx) /. 2.))) in
+  if dx = sx || (dy = sy && dx > sx) then []
+  else if dx >= sx +. (2. *. cell) then
+    let mid = Float.max (sx +. cell) (Float.min (dx -. cell) (snap ((sx +. dx) /. 2.))) in
     [ { x = mid; y = sy }; { x = mid; y = dy } ]
-  else
-    let away = Float.max sy dy +. (2. *. off) in
-    [
-      { x = sx +. off; y = sy };
-      { x = sx +. off; y = away };
-      { x = dx -. off; y = away };
-      { x = dx -. off; y = dy };
-    ]
+  else [ { x = dx -. cell; y = sy }; { x = dx -. cell; y = dy } ]
 
 let ink = (0.13, 0.15, 0.19)
 let paper = (1., 1., 1.)

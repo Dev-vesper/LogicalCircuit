@@ -25,10 +25,10 @@ val input_ports : Logic.Circuit.kind -> point list
 val output_port : Logic.Circuit.kind -> point
 
 val route : sx:float -> sy:float -> dx:float -> dy:float -> point list
-(** The interior bends of a tidy orthogonal path from an output port at [(sx, sy)] to a
-    target at [(dx, dy)]: no bends when the target is level with the port and to its
-    right, a three-piece dogleg when there is room for one, and a five-piece detour
-    around both symbols when there is not. Every bend is a multiple of [cell]. *)
+(** The interior bends of the nearest orthogonal path from an output port at [(sx, sy)]
+    to a target at [(dx, dy)]: no bends when the ports face each other, one dogleg in the
+    space between them when there is room for one, and otherwise one dogleg just before
+    the target. Every bend is a multiple of [cell]. *)
 
 val ink : float * float * float
 val paper : float * float * float
