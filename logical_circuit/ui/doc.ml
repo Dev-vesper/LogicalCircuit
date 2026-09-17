@@ -9,6 +9,7 @@ type node = {
   mutable y : float;
   mutable level : bool;
   mutable ports : id option array;
+  mutable routes : (float * float) list array;
 }
 
 type wire = { src : id; dst : id; port : int }
@@ -37,7 +38,15 @@ let arity = function Circuit.Input -> 0 | Circuit.Gate g -> Gate.arity g
 let add t ~kind ~x ~y =
   let id = Dynarray.length t.nodes in
   Dynarray.add_last t.nodes
-    { id; kind; x; y; level = false; ports = Array.make (arity kind) None };
+    {
+      id;
+      kind;
+      x;
+      y;
+      level = false;
+      ports = Array.make (arity kind) None;
+      routes = Array.make (arity kind) [];
+    };
   id
 
 let move t id ~x ~y =
@@ -63,20 +72,24 @@ let connect ?port t ~src ~dst =
       n.ports.(p) <- Some src;
       Some p
 
-let disconnect t ~dst ~port = (node t dst).ports.(port) <- None
+let disconnect t ~dst ~port =
+  let n = node t dst in
+  n.ports.(port) <- None;
+  n.routes.(port) <- []
 
 let remove t id =
   let last = Dynarray.length t.nodes - 1 in
   Dynarray.iter
     (fun n ->
       if n.id > id then begin
-        n.ports <-
-          Array.map
-            (function
-              | Some src when src = id -> None
-              | Some src when src > id -> Some (src - 1)
-              | other -> other)
-            n.ports;
+        Array.iteri
+          (fun port -> function
+            | Some src when src = id ->
+                n.ports.(port) <- None;
+                n.routes.(port) <- []
+            | Some src when src > id -> n.ports.(port) <- Some (src - 1)
+            | _ -> ())
+          n.ports;
         n.id <- n.id - 1
       end)
     t.nodes;
@@ -86,6 +99,22 @@ let remove t id =
   Dynarray.truncate t.nodes last
 
 let clear t = Dynarray.clear t.nodes
+
+let route t ~dst ~port =
+  let n = node t dst in
+  match n.ports.(port) with
+  | None -> []
+  | Some src ->
+      let s = node t src in
+      List.map (fun (ox, oy) -> (s.x +. ox, s.y +. oy)) n.routes.(port)
+
+let set_route t ~dst ~port bends =
+  let n = node t dst in
+  match n.ports.(port) with
+  | None -> ()
+  | Some src ->
+      let s = node t src in
+      n.routes.(port) <- List.map (fun (x, y) -> (x -. s.x, y -. s.y)) bends
 
 let build t =
   let c = Circuit.create () in

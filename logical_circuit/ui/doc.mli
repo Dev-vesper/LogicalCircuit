@@ -12,6 +12,9 @@ type node = {
   mutable y : float;
   mutable level : bool;  (** the value of an input node *)
   mutable ports : id option array;  (** the source node of each input port, in port order *)
+  mutable routes : (float * float) list array;
+      (** the bends of the wire in each port, as offsets from the source node's position:
+          [[]] while the wire still routes itself *)
 }
 
 type wire = { src : id; dst : id; port : int }
@@ -37,6 +40,17 @@ val connect : ?port:int -> t -> src:id -> dst:id -> int option
     port otherwise. [None] when every port of [dst] is taken. *)
 
 val disconnect : t -> dst:id -> port:int -> unit
+
+val route : t -> dst:id -> port:int -> (float * float) list
+(** The interior bends of the wire wired into this port, in absolute board coordinates,
+    or [[]] while the wire still routes itself. The bends are remembered as offsets from
+    the source node, so moving the source carries the route along and moving the
+    destination only stretches the last segment. *)
+
+val set_route : t -> dst:id -> port:int -> (float * float) list -> unit
+(** Replaces the bends of the wire wired into this port, in absolute coordinates; does
+    nothing when the port is empty. *)
+
 val remove : t -> id -> unit
 (** Drops the node and every wire that touches it. Ids stay dense: the nodes after it
     move down one, and the wires that pointed at them follow. *)
