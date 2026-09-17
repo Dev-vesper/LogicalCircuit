@@ -91,19 +91,6 @@ let wire_ends doc (w : Doc.wire) =
   let b = List.nth (Shapes.input_ports dst.kind) w.port in
   (src.x +. a.x, src.y +. a.y, dst.x +. b.x, dst.y +. b.y)
 
-(* The bends the wire is drawn with: the ones the user adjusted, or the ones the router
-   would lay down now. *)
-let bends_of doc (w : Doc.wire) =
-  match Doc.route doc ~dst:w.dst ~port:w.port with
-  | [] ->
-      let sx, sy, dx, dy = wire_ends doc w in
-      List.map (fun (p : Shapes.point) -> (p.x, p.y)) (Shapes.route ~sx ~sy ~dx ~dy)
-  | stored -> stored
-
-let wire_path doc (w : Doc.wire) =
-  let sx, sy, dx, dy = wire_ends doc w in
-  (sx, sy) :: (bends_of doc w @ [ (dx, dy) ])
-
 let distance_to_segment px py ax ay bx by =
   let vx = bx -. ax and vy = by -. ay in
   let length2 = (vx *. vx) +. (vy *. vy) in
@@ -149,8 +136,34 @@ let orthogonalize pts =
   in
   match pts with [] | [ _ ] -> pts | p :: rest -> go [ p ] p rest
 
-let with_bend bends index (x, y) =
-  orthogonalize (List.mapi (fun i p -> if i = index then (x, y) else p) bends)
+(* A wire keeps its right angles as things move around it: its ports are pinned, so the
+   whole run — port, bends, port — goes through the corner pass, which drops a corner
+   wherever a node move or a bend drag left a segment leaning. *)
+let fit doc (w : Doc.wire) bends =
+  let sx, sy, dx, dy = wire_ends doc w in
+  match orthogonalize ((sx, sy) :: bends @ [ (dx, dy) ]) with
+  | _ :: rest -> ( match List.rev rest with _ :: mid -> List.rev mid | [] -> [])
+  | [] -> []
+
+let with_bend doc (w : Doc.wire) bends index (x, y) =
+  fit doc w (List.mapi (fun i p -> if i = index then (x, y) else p) bends)
+
+(* The bends the wire is drawn with: the ones the user adjusted, or the ones the router
+   would lay down now — run past the ports, so that moving a node, or dragging a bend,
+   leaves a corner instead of a diagonal. *)
+let bends_of doc (w : Doc.wire) =
+  let bends =
+    match Doc.route doc ~dst:w.dst ~port:w.port with
+    | [] ->
+        let sx, sy, dx, dy = wire_ends doc w in
+        List.map (fun (p : Shapes.point) -> (p.x, p.y)) (Shapes.route ~sx ~sy ~dx ~dy)
+    | stored -> stored
+  in
+  fit doc w bends
+
+let wire_path doc (w : Doc.wire) =
+  let sx, sy, dx, dy = wire_ends doc w in
+  (sx, sy) :: (bends_of doc w @ [ (dx, dy) ])
 
 let draw_path cr ~color ~width ~dash pts =
   match pts with
@@ -539,13 +552,15 @@ class canvas () = object (self)
               !(d.bends)
           in
           d.bends := bends;
-          Doc.set_route doc ~dst:d.wire.dst ~port:d.wire.port bends;
+          Doc.set_route doc ~dst:d.wire.dst ~port:d.wire.port (fit doc d.wire bends);
           moved <- true;
           area#misc#queue_draw ()
         end
     | Some (Shaping d) ->
         if dragged_far (fst d.origin) (snd d.origin) then begin
-          let bends = with_bend d.bends d.index (dot_snap mx, dot_snap my) in
+          let bends =
+            with_bend doc d.wire d.bends d.index (dot_snap mx, dot_snap my)
+          in
           Doc.set_route doc ~dst:d.wire.dst ~port:d.wire.port bends;
           moved <- true;
           area#misc#queue_draw ()
@@ -579,13 +594,15 @@ class canvas () = object (self)
         | None -> report "a wire has to end on an input port")
     | Some (Adjusting d) ->
         if moved then begin
-          let bends = normalize !(d.bends) in
+          let bends = normalize (fit doc d.wire !(d.bends)) in
           Doc.set_route doc ~dst:d.wire.dst ~port:d.wire.port bends;
           report "wire adjusted"
         end
     | Some (Shaping d) ->
         if moved then begin
-          let bends = normalize (with_bend d.bends d.index (dot_snap mx, dot_snap my)) in
+          let bends =
+            normalize (with_bend doc d.wire d.bends d.index (dot_snap mx, dot_snap my))
+          in
           Doc.set_route doc ~dst:d.wire.dst ~port:d.wire.port bends;
           report "wire adjusted"
         end
