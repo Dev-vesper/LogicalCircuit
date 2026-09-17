@@ -17,6 +17,12 @@ type drag =
       origin : float * float;  (** where the press landed, to tell a click from a drag *)
       bends : (float * float) list ref;  (** the working copy of the wire's bends *)
     }
+  | Shaping of {
+      wire : Doc.wire;
+      index : int;  (** which bend of the wire follows the pointer *)
+      origin : float * float;
+      bends : (float * float) list;  (** the wire's bends as the press found them *)
+    }
 
 type view = {
   values : Gate.value array;
@@ -31,11 +37,15 @@ let snap v = Float.round (v /. Shapes.cell) *. Shapes.cell
 
 let snap_radius = 14.
 let wire_hit_radius = 8.
+let handle_radius = 8.
 
 (* The dot lattice is painted twice as densely as the grid things snap to: it is only the
    page's texture, while positions stay on [Shapes.cell]. The whole board is painted with
    one repeating pattern, instead of one dot per arc, per expose. *)
 let dot_spacing = Shapes.cell /. 2.
+
+(* A point of a wire moves from dot to dot, one at a time. *)
+let dot_snap v = Float.round (v /. dot_spacing) *. dot_spacing
 
 let grid_tile =
   lazy
@@ -117,6 +127,31 @@ let normalize bends =
   in
   go bends
 
+(* A single bend dragged off its row or column leaves its two segments diagonal; a corner
+   is put back before each of them, so the path — the moved bend, the corners it now needs,
+   and every point the user did not touch — keeps its right angles. *)
+let orthogonalize pts =
+  let rec go acc prev = function
+    | p :: rest when p = prev -> go acc prev rest
+    | p :: rest ->
+        let acc =
+          if fst prev = fst p || snd prev = snd p then acc
+          else
+            let corner =
+              match rest with
+              | q :: _ when fst p = fst q -> (fst p, snd prev)
+              | _ -> (fst prev, snd p)
+            in
+            corner :: acc
+        in
+        go (p :: acc) p rest
+    | [] -> List.rev acc
+  in
+  match pts with [] | [ _ ] -> pts | p :: rest -> go [ p ] p rest
+
+let with_bend bends index (x, y) =
+  orthogonalize (List.mapi (fun i p -> if i = index then (x, y) else p) bends)
+
 let draw_path cr ~color ~width ~dash pts =
   match pts with
   | (x0, y0) :: rest ->
@@ -189,8 +224,8 @@ let render cr doc ~width ~height view =
         Cairo.stroke cr;
         Cairo.set_dash cr [||]
       end);
-  (match view.selection with
-  | Some (Wire w) ->
+  (match (match view.selection with Some (Wire w) -> Some w | _ -> view.hover) with
+  | Some w ->
       List.iter
         (fun (x, y) ->
           Cairo.rectangle cr (x -. 3.) (y -. 3.) ~w:6. ~h:6.;
@@ -200,7 +235,7 @@ let render cr doc ~width ~height view =
           Cairo.set_line_width cr 1.5;
           Cairo.stroke cr)
         (bends_of doc w)
-  | Some (Node _) | None -> ());
+  | None -> ());
   match view.drag with
   | Some (Wiring d) ->
       let node = Doc.node doc d.src in
@@ -226,7 +261,7 @@ let render cr doc ~width ~height view =
           Cairo.arc cr d.tx d.ty ~r:3. ~a1:0. ~a2:(2. *. Float.pi);
           Shapes.set_color cr Shapes.selected;
           Cairo.fill cr)
-  | Some (Moving _) | Some (Adjusting _) | None -> ()
+  | Some (Moving _) | Some (Adjusting _) | Some (Shaping _) | None -> ()
 
 let render_board cr doc ~width ~height =
   let values, on_cycle, letters = snapshot doc in
@@ -313,7 +348,23 @@ class canvas () = object (self)
   method private wire_target mx my =
     match self#input_target mx my with
     | Some (hit, x, y) -> (x, y, Some hit)
-    | None -> (snap mx, snap my, None)
+    | None -> (dot_snap mx, dot_snap my, None)
+
+  (* The bend handle under the pointer, on any wire: grabbing a point of a wire is how the
+     user takes one over. *)
+  method private bend_at mx my =
+    let best = ref None in
+    List.iter
+      (fun (w : Doc.wire) ->
+        List.iteri
+          (fun i (x, y) ->
+            let d = Float.hypot (mx -. x) (my -. y) in
+            match !best with
+            | Some (_, _, bd) when bd <= d -> ()
+            | _ -> if d <= handle_radius then best := Some (w, i, d))
+          (bends_of doc w))
+      (Doc.wires doc);
+    match !best with Some (w, i, _) -> Some (w, i) | None -> None
 
   method private wire_at mx my =
     let best = ref None in
@@ -410,27 +461,41 @@ class canvas () = object (self)
                              origin = (mx, my);
                            })
                 | None -> (
-                    match self#wire_at mx my with
-                    | Some (w, segment) ->
+                    match self#bend_at mx my with
+                    | Some (w, index) ->
                         selection <- Some (Wire w);
-                        (match self#segment_handle w segment mx my with
-                        | Some (vertical, grab) ->
-                            drag <-
-                              Some
-                                (Adjusting
-                                   {
-                                     wire = w;
-                                     segment;
-                                     vertical;
-                                     grab;
-                                     origin = (mx, my);
-                                     bends = ref (bends_of doc w);
-                                   })
-                        | None -> ());
+                        drag <-
+                          Some
+                            (Shaping
+                               {
+                                 wire = w;
+                                 index;
+                                 origin = (mx, my);
+                                 bends = bends_of doc w;
+                               });
                         area#misc#queue_draw ()
-                    | None ->
-                        selection <- None;
-                        area#misc#queue_draw ()))))
+                    | None -> (
+                        match self#wire_at mx my with
+                        | Some (w, segment) ->
+                            selection <- Some (Wire w);
+                            (match self#segment_handle w segment mx my with
+                            | Some (vertical, grab) ->
+                                drag <-
+                                  Some
+                                    (Adjusting
+                                       {
+                                         wire = w;
+                                         segment;
+                                         vertical;
+                                         grab;
+                                         origin = (mx, my);
+                                         bends = ref (bends_of doc w);
+                                       })
+                            | None -> ());
+                            area#misc#queue_draw ()
+                        | None ->
+                            selection <- None;
+                            area#misc#queue_draw ())))))
     | 3 -> (
         match self#node_at mx my with
         | Some id ->
@@ -464,7 +529,7 @@ class canvas () = object (self)
         area#misc#queue_draw ()
     | Some (Adjusting d) ->
         if dragged_far (fst d.origin) (snd d.origin) then begin
-          let value = snap (if d.vertical then mx -. d.grab else my -. d.grab) in
+          let value = dot_snap (if d.vertical then mx -. d.grab else my -. d.grab) in
           let bends =
             List.mapi
               (fun i (x, y) ->
@@ -478,6 +543,13 @@ class canvas () = object (self)
           moved <- true;
           area#misc#queue_draw ()
         end
+    | Some (Shaping d) ->
+        if dragged_far (fst d.origin) (snd d.origin) then begin
+          let bends = with_bend d.bends d.index (dot_snap mx, dot_snap my) in
+          Doc.set_route doc ~dst:d.wire.dst ~port:d.wire.port bends;
+          moved <- true;
+          area#misc#queue_draw ()
+        end
     | None ->
         let under = Option.map fst (self#wire_at mx my) in
         if under <> hover then begin
@@ -486,7 +558,8 @@ class canvas () = object (self)
         end);
     true
 
-  method private release _ev =
+  method private release ev =
+    let mx = GdkEvent.Button.x ev and my = GdkEvent.Button.y ev in
     (match drag with
     | Some (Moving d) when not moved -> (
         match (Doc.node doc d.node).kind with
@@ -507,6 +580,12 @@ class canvas () = object (self)
     | Some (Adjusting d) ->
         if moved then begin
           let bends = normalize !(d.bends) in
+          Doc.set_route doc ~dst:d.wire.dst ~port:d.wire.port bends;
+          report "wire adjusted"
+        end
+    | Some (Shaping d) ->
+        if moved then begin
+          let bends = normalize (with_bend d.bends d.index (dot_snap mx, dot_snap my)) in
           Doc.set_route doc ~dst:d.wire.dst ~port:d.wire.port bends;
           report "wire adjusted"
         end
