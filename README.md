@@ -84,10 +84,14 @@ locally with `dune test --force` when it is present.
 - Drag a node with the mouse to move it — positions snap to the grid.
 - Click an `Input` circle to toggle it between 0 and 1; the whole circuit recalculates
   instantly.
-- Drag from an output port to an input port to wire two nodes; the wire snaps onto the
-  port and is politely refused if the port is already taken.
-- Click a wire to select it, then press `Delete` (or right-click) to remove it.
-  Right-click a node to delete it together with its wires.
+- Drag from an output port to wire two nodes: the loose end settles on the nearest dot
+  as you move, and snaps onto the input port under the pointer, which lights up. The
+  wire is politely refused if the port is already taken.
+- Wires route themselves as clean right angles between the ports. To lay one out
+  yourself, drag any segment of it: the segment follows the mouse, its bends land on the
+  dots, and the ends stay on the ports.
+- Click a wire to select it (its bends show as handles), then press `Delete` (or
+  right-click) to remove it. Right-click a node to delete it together with its wires.
 - `Escape` cancels a wire drag and returns to `Select`.
 
 Wire colours show the value they carry: **green** = 1, **grey** = 0, **amber** = unknown
