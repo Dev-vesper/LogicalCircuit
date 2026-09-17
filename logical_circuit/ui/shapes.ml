@@ -21,9 +21,22 @@ let output_port = function
   | Circuit.Input -> { x = 46.; y = 30. }
   | Circuit.Gate _ -> { x = 60.; y = 30. }
 
-let wire_controls sx sy dx dy =
-  let bend = Float.max 30. (Float.abs (dx -. sx) *. 0.45) in
-  (sx, sy, sx +. bend, sy, dx -. bend, dy, dx, dy)
+let snap v = Float.round (v /. cell) *. cell
+
+let route ~sx ~sy ~dx ~dy =
+  let off = cell in
+  if dy = sy && dx >= sx then []
+  else if dx >= sx +. (2. *. off) then
+    let mid = Float.max (sx +. off) (Float.min (dx -. off) (snap ((sx +. dx) /. 2.))) in
+    [ { x = mid; y = sy }; { x = mid; y = dy } ]
+  else
+    let away = Float.max sy dy +. (2. *. off) in
+    [
+      { x = sx +. off; y = sy };
+      { x = sx +. off; y = away };
+      { x = dx -. off; y = away };
+      { x = dx -. off; y = dy };
+    ]
 
 let ink = (0.13, 0.15, 0.19)
 let paper = (1., 1., 1.)

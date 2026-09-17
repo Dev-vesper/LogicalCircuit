@@ -24,10 +24,11 @@ val input_ports : Logic.Circuit.kind -> point list
 
 val output_port : Logic.Circuit.kind -> point
 
-val wire_controls :
-  float -> float -> float -> float -> float * float * float * float * float * float * float * float
-(** [wire_controls sx sy dx dy] is the cubic Bézier a wire is drawn and hit-tested as,
-    as [x0 y0 x1 y1 x2 y2 x3 y3]. *)
+val route : sx:float -> sy:float -> dx:float -> dy:float -> point list
+(** The interior bends of a tidy orthogonal path from an output port at [(sx, sy)] to a
+    target at [(dx, dy)]: no bends when the target is level with the port and to its
+    right, a three-piece dogleg when there is room for one, and a five-piece detour
+    around both symbols when there is not. Every bend is a multiple of [cell]. *)
 
 val ink : float * float * float
 val paper : float * float * float
