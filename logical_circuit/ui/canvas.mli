@@ -4,7 +4,13 @@
 
     A click never edits the model twice: the press arms a gesture and the release
     finishes it, except for the three edits that a press alone decides (placing a node,
-    detaching a wire, deleting in one right-click). *)
+    detaching a wire, deleting in one right-click).
+
+    A wire routes itself at first — a tidy orthogonal path between its two ports — and
+    the user can take it over: dragging a segment of a wire moves that segment, with
+    every bend landing on the dot grid. While a wire is being pulled out of an output
+    port its free end settles on the nearest dot, or snaps onto the input port under the
+    pointer. *)
 
 type tool = Select | Place of Logic.Circuit.kind
 (** What the next click on the board does: pick something up, or drop a new node. *)

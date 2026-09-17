@@ -5,18 +5,47 @@ type tool = Select | Place of Circuit.kind
 type selection = Node of Doc.id | Wire of Doc.wire
 
 type drag =
-  | Moving of Doc.id * float * float  (** node, and the offset it was grabbed at *)
-  | Wiring of Doc.id * float * float  (** source node, and where the free end is now *)
+  | Moving of { node : Doc.id; offset : float * float; origin : float * float }
+      (** node, the offset it was grabbed at, and where the press landed *)
+  | Wiring of { src : Doc.id; tx : float; ty : float; target : (Doc.id * int) option }
+      (** source node, where the free end is now, and the input port it settled on *)
+  | Adjusting of {
+      wire : Doc.wire;
+      segment : int;
+      vertical : bool;
+      grab : float;  (** cursor minus the segment, along the axis it moves on *)
+      origin : float * float;  (** where the press landed, to tell a click from a drag *)
+      bends : (float * float) list ref;  (** the working copy of the wire's bends *)
+    }
 
 type view = {
   values : Gate.value array;
   on_cycle : bool array;
   letters : string array;
   selection : selection option;
+  hover : Doc.wire option;
   drag : drag option;
 }
 
 let snap v = Float.round (v /. Shapes.cell) *. Shapes.cell
+
+let snap_radius = 14.
+let wire_hit_radius = 8.
+
+(* The dot lattice is painted twice as densely as the grid things snap to: it is only the
+   page's texture, while positions stay on [Shapes.cell]. The whole board is painted with
+   one repeating pattern, instead of one dot per arc, per expose. *)
+let dot_spacing = Shapes.cell /. 2.
+
+let grid_tile =
+  lazy
+    (let side = int_of_float dot_spacing in
+     let tile = Cairo.Image.create Cairo.Image.ARGB32 ~w:side ~h:side in
+     let cr = Cairo.create tile in
+     Cairo.arc cr 0. 0. ~r:1. ~a1:0. ~a2:(2. *. Float.pi);
+     Shapes.set_color cr Shapes.grid;
+     Cairo.fill cr;
+     tile)
 
 let letter k =
   if k < 26 then String.make 1 (Char.chr (Char.code 'A' + k))
@@ -46,69 +75,81 @@ let value_of view id =
 let on_cycle view id =
   id >= 0 && id < Array.length view.on_cycle && view.on_cycle.(id)
 
-let wire_endpoints doc (w : Doc.wire) =
+let wire_ends doc (w : Doc.wire) =
   let src = Doc.node doc w.src and dst = Doc.node doc w.dst in
   let a = Shapes.output_port src.kind in
   let b = List.nth (Shapes.input_ports dst.kind) w.port in
   (src.x +. a.x, src.y +. a.y, dst.x +. b.x, dst.y +. b.y)
 
-let cubic x0 y0 x1 y1 x2 y2 x3 y3 t =
-  let u = 1. -. t in
-  let a = u *. u *. u and b = 3. *. u *. u *. t in
-  let c = 3. *. u *. t *. t and d = t *. t *. t in
-  ( (a *. x0) +. (b *. x1) +. (c *. x2) +. (d *. x3),
-    (a *. y0) +. (b *. y1) +. (c *. y2) +. (d *. y3) )
+(* The bends the wire is drawn with: the ones the user adjusted, or the ones the router
+   would lay down now. *)
+let bends_of doc (w : Doc.wire) =
+  match Doc.route doc ~dst:w.dst ~port:w.port with
+  | [] ->
+      let sx, sy, dx, dy = wire_ends doc w in
+      List.map (fun (p : Shapes.point) -> (p.x, p.y)) (Shapes.route ~sx ~sy ~dx ~dy)
+  | stored -> stored
 
-let draw_wire cr ~color ~width ~dash doc (w : Doc.wire) =
-  let sx, sy, dx, dy = wire_endpoints doc w in
-  let x0, y0, x1, y1, x2, y2, x3, y3 = Shapes.wire_controls sx sy dx dy in
-  Cairo.move_to cr x0 y0;
-  Cairo.curve_to cr x1 y1 x2 y2 x3 y3;
-  Shapes.set_color cr color;
-  Cairo.set_line_width cr width;
-  (match dash with Some d -> Cairo.set_dash cr d | None -> ());
-  Cairo.stroke cr;
-  Cairo.set_dash cr [||]
+let wire_path doc (w : Doc.wire) =
+  let sx, sy, dx, dy = wire_ends doc w in
+  (sx, sy) :: (bends_of doc w @ [ (dx, dy) ])
+
+let distance_to_segment px py ax ay bx by =
+  let vx = bx -. ax and vy = by -. ay in
+  let length2 = (vx *. vx) +. (vy *. vy) in
+  let t =
+    if length2 = 0. then 0.
+    else
+      Float.max 0. (Float.min 1. (((px -. ax) *. vx) +. ((py -. ay) *. vy) /. length2))
+  in
+  Float.hypot (px -. (ax +. (t *. vx))) (py -. (ay +. (t *. vy)))
+
+(* Collapses what a drag can leave behind: repeated points, and turns through a middle
+   point that lies on the straight line between its neighbours. *)
+let normalize bends =
+  let rec go = function
+    | (x0, y0) :: (x1, y1) :: rest when x0 = x1 && y0 = y1 -> go ((x1, y1) :: rest)
+    | (x0, y0) :: (x1, y1) :: (x2, y2) :: rest
+      when (x0 = x1 && x1 = x2) || (y0 = y1 && y1 = y2) ->
+        go ((x0, y0) :: (x2, y2) :: rest)
+    | p :: rest -> p :: go rest
+    | [] -> []
+  in
+  go bends
+
+let draw_path cr ~color ~width ~dash pts =
+  match pts with
+  | (x0, y0) :: rest ->
+      Cairo.move_to cr x0 y0;
+      List.iter (fun (x, y) -> Cairo.line_to cr x y) rest;
+      Shapes.set_color cr color;
+      Cairo.set_line_width cr width;
+      Cairo.set_line_join cr Cairo.JOIN_ROUND;
+      (match dash with Some d -> Cairo.set_dash cr d | None -> ());
+      Cairo.stroke cr;
+      Cairo.set_dash cr [||]
+  | [] -> ()
 
 let render cr doc ~width ~height view =
   Shapes.set_color cr Shapes.paper;
   Cairo.paint cr;
-  let x = ref 0. in
-  while !x <= width do
-    let y = ref 0. in
-    while !y <= height do
-      Cairo.Path.sub cr;
-      Cairo.arc cr !x !y ~r:1.1 ~a1:0. ~a2:(2. *. Float.pi);
-      y := !y +. Shapes.cell
-    done;
-    x := !x +. Shapes.cell
-  done;
-  Shapes.set_color cr Shapes.grid;
+  let tile = Cairo.Pattern.create_for_surface (Lazy.force grid_tile) in
+  Cairo.Pattern.set_extend tile Cairo.Pattern.REPEAT;
+  Cairo.set_source cr tile;
+  Cairo.rectangle cr 0. 0. ~w:width ~h:height;
   Cairo.fill cr;
   List.iter
     (fun (w : Doc.wire) ->
       let picked = view.selection = Some (Wire w) in
+      let hovered = view.hover = Some w in
       let color =
         if on_cycle view w.src && on_cycle view w.dst then Shapes.cycle
-        else if picked then Shapes.selected
+        else if picked || hovered then Shapes.selected
         else Shapes.color_of_value (value_of view w.src)
       in
-      draw_wire cr ~color ~width:(if picked then 3.5 else 2.5) ~dash:None doc w)
+      draw_path cr ~color ~width:(if picked then 3.5 else if hovered then 3. else 2.5)
+        ~dash:None (wire_path doc w))
     (Doc.wires doc);
-  (match view.drag with
-  | Some (Wiring (src, mx, my)) ->
-      let node = Doc.node doc src in
-      let port = Shapes.output_port node.kind in
-      let sx = node.x +. port.x and sy = node.y +. port.y in
-      let x0, y0, x1, y1, x2, y2, x3, y3 = Shapes.wire_controls sx sy mx my in
-      Cairo.move_to cr x0 y0;
-      Cairo.curve_to cr x1 y1 x2 y2 x3 y3;
-      Shapes.set_color cr Shapes.selected;
-      Cairo.set_line_width cr 2.5;
-      Cairo.set_dash cr [| 6.; 4. |];
-      Cairo.stroke cr;
-      Cairo.set_dash cr [||]
-  | Some (Moving _) | None -> ());
   Doc.iter doc (fun node ->
       (match node.kind with
       | Circuit.Input ->
@@ -147,12 +188,50 @@ let render cr doc ~width ~height view =
         Cairo.set_dash cr [| 5.; 3. |];
         Cairo.stroke cr;
         Cairo.set_dash cr [||]
-      end)
+      end);
+  (match view.selection with
+  | Some (Wire w) ->
+      List.iter
+        (fun (x, y) ->
+          Cairo.rectangle cr (x -. 3.) (y -. 3.) ~w:6. ~h:6.;
+          Shapes.set_color cr Shapes.paper;
+          Cairo.fill_preserve cr;
+          Shapes.set_color cr Shapes.selected;
+          Cairo.set_line_width cr 1.5;
+          Cairo.stroke cr)
+        (bends_of doc w)
+  | Some (Node _) | None -> ());
+  match view.drag with
+  | Some (Wiring d) ->
+      let node = Doc.node doc d.src in
+      let port = Shapes.output_port node.kind in
+      let sx = node.x +. port.x and sy = node.y +. port.y in
+      let bends =
+        List.map
+          (fun (p : Shapes.point) -> (p.x, p.y))
+          (Shapes.route ~sx ~sy ~dx:d.tx ~dy:d.ty)
+      in
+      draw_path cr ~color:Shapes.selected ~width:2.5 ~dash:(Some [| 6.; 4. |])
+        ((sx, sy) :: (bends @ [ (d.tx, d.ty) ]));
+      (match d.target with
+      | Some (dst, index) ->
+          let target = Doc.node doc dst in
+          let p = List.nth (Shapes.input_ports target.kind) index in
+          Cairo.arc cr (target.x +. p.x) (target.y +. p.y) ~r:8. ~a1:0.
+            ~a2:(2. *. Float.pi);
+          Shapes.set_color cr Shapes.selected;
+          Cairo.set_line_width cr 2.;
+          Cairo.stroke cr
+      | None ->
+          Cairo.arc cr d.tx d.ty ~r:3. ~a1:0. ~a2:(2. *. Float.pi);
+          Shapes.set_color cr Shapes.selected;
+          Cairo.fill cr)
+  | Some (Moving _) | Some (Adjusting _) | None -> ()
 
 let render_board cr doc ~width ~height =
   let values, on_cycle, letters = snapshot doc in
   render cr doc ~width ~height
-    { values; on_cycle; letters; selection = None; drag = None }
+    { values; on_cycle; letters; selection = None; hover = None; drag = None }
 
 type port_hit = Out of Doc.id | In of Doc.id * int
 
@@ -164,6 +243,7 @@ class canvas () = object (self)
   val mutable letters : string array = [||]
   val mutable tool = Select
   val mutable selection : selection option = None
+  val mutable hover : Doc.wire option = None
   val mutable drag : drag option = None
   val mutable moved = false
   val mutable report : string -> unit = (fun _ -> ())
@@ -188,7 +268,7 @@ class canvas () = object (self)
     letters <- names;
     area#misc#queue_draw ()
 
-  method private view () = { values; on_cycle; letters; selection; drag }
+  method private view () = { values; on_cycle; letters; selection; hover; drag }
 
   method private node_at mx my =
     let hit = ref None in
@@ -200,33 +280,77 @@ class canvas () = object (self)
     !hit
 
   method private port_at mx my =
-    let near x y = Float.hypot (mx -. x) (my -. y) <= 9. in
-    let hit = ref None in
+    let best = ref None in
+    let consider x y hit =
+      let d = Float.hypot (mx -. x) (my -. y) in
+      let better = match !best with None -> true | Some (_, bd) -> d < bd in
+      if better && d <= snap_radius then best := Some (hit, d)
+    in
     Doc.iter doc (fun node ->
         let out = Shapes.output_port node.kind in
-        if near (node.x +. out.x) (node.y +. out.y) then hit := Some (Out node.id)
-        else
-          List.iteri
-            (fun i (port : Shapes.point) ->
-              if near (node.x +. port.x) (node.y +. port.y) then
-                hit := Some (In (node.id, i)))
-            (Shapes.input_ports node.kind));
-    !hit
+        consider (node.x +. out.x) (node.y +. out.y) (Out node.id);
+        List.iteri
+          (fun i (port : Shapes.point) ->
+            consider (node.x +. port.x) (node.y +. port.y) (In (node.id, i)))
+          (Shapes.input_ports node.kind));
+    Option.map fst !best
+
+  (* The input port the free end of a wire would settle on, with its position. *)
+  method private input_target mx my =
+    let best = ref None in
+    let consider x y hit =
+      let d = Float.hypot (mx -. x) (my -. y) in
+      let better = match !best with None -> true | Some (_, _, _, bd) -> d < bd in
+      if better && d <= snap_radius then best := Some (hit, x, y, d)
+    in
+    Doc.iter doc (fun node ->
+        List.iteri
+          (fun i (port : Shapes.point) ->
+            consider (node.x +. port.x) (node.y +. port.y) (node.id, i))
+          (Shapes.input_ports node.kind));
+    Option.map (fun (hit, x, y, _) -> (hit, x, y)) !best
+
+  method private wire_target mx my =
+    match self#input_target mx my with
+    | Some (hit, x, y) -> (x, y, Some hit)
+    | None -> (snap mx, snap my, None)
 
   method private wire_at mx my =
-    let best = ref (None, 8.) in
+    let best = ref None in
     List.iter
       (fun (w : Doc.wire) ->
-        let sx, sy, dx, dy = wire_endpoints doc w in
-        let x0, y0, x1, y1, x2, y2, x3, y3 = Shapes.wire_controls sx sy dx dy in
-        for step = 0 to 20 do
-          let px, py = cubic x0 y0 x1 y1 x2 y2 x3 y3 (float step /. 20.) in
-          let distance = Float.hypot (mx -. px) (my -. py) in
-          let _, shortest = !best in
-          if distance < shortest then best := (Some w, distance)
-        done)
+        let rec go i = function
+          | (ax, ay) :: ((bx, by) :: _ as rest) ->
+              let d = distance_to_segment mx my ax ay bx by in
+              (match !best with
+              | Some (_, _, bd) when bd <= d -> ()
+              | _ -> if d <= wire_hit_radius then best := Some (w, i, d));
+              go (i + 1) rest
+          | _ -> ()
+        in
+        go 0 (wire_path doc w))
       (Doc.wires doc);
-    fst !best
+    match !best with Some (w, i, _) -> Some (w, i) | None -> None
+
+  (* How the segment under the press could move, if it can: a vertical segment slides
+     sideways, a horizontal one only when both of its ends are bends, because a port does
+     not move. *)
+  method private segment_handle (w : Doc.wire) segment mx my =
+    let bends = bends_of doc w in
+    let count = List.length bends in
+    let sx, sy, dx, dy = wire_ends doc w in
+    let point_at k =
+      if k = 0 then (sx, sy)
+      else if k = count + 1 then (dx, dy)
+      else List.nth bends (k - 1)
+    in
+    if segment < 0 || segment > count then None
+    else
+      let ax, ay = point_at segment in
+      let bx, by = point_at (segment + 1) in
+      let vertical = ax = bx in
+      if (not vertical) && not (segment > 0 && segment < count) then None
+      else Some (vertical, if vertical then mx -. ax else my -. ay)
 
   method delete_selection () =
     (match selection with
@@ -238,11 +362,13 @@ class canvas () = object (self)
         report "wire deleted"
     | None -> report "nothing is selected");
     selection <- None;
+    hover <- None;
     self#refresh ()
 
   method clear () =
     Doc.clear doc;
     selection <- None;
+    hover <- None;
     drag <- None;
     report "the board is empty";
     self#refresh ()
@@ -250,6 +376,7 @@ class canvas () = object (self)
   method private press ev =
     let mx = GdkEvent.Button.x ev and my = GdkEvent.Button.y ev in
     area#misc#grab_focus ();
+    hover <- None;
     (match GdkEvent.Button.button ev with
     | 1 -> (
         match tool with
@@ -261,7 +388,9 @@ class canvas () = object (self)
             self#refresh ()
         | Select -> (
             match self#port_at mx my with
-            | Some (Out id) -> drag <- Some (Wiring (id, mx, my))
+            | Some (Out id) ->
+                let tx, ty, target = self#wire_target mx my in
+                drag <- Some (Wiring { src = id; tx; ty; target })
             | Some (In (dst, port)) ->
                 if (Doc.node doc dst).ports.(port) <> None then begin
                   Doc.disconnect doc ~dst ~port;
@@ -272,11 +401,32 @@ class canvas () = object (self)
                 match self#node_at mx my with
                 | Some id ->
                     let node = Doc.node doc id in
-                    drag <- Some (Moving (id, mx -. node.x, my -. node.y))
+                    drag <-
+                      Some
+                        (Moving
+                           {
+                             node = id;
+                             offset = (mx -. node.x, my -. node.y);
+                             origin = (mx, my);
+                           })
                 | None -> (
                     match self#wire_at mx my with
-                    | Some w ->
+                    | Some (w, segment) ->
                         selection <- Some (Wire w);
+                        (match self#segment_handle w segment mx my with
+                        | Some (vertical, grab) ->
+                            drag <-
+                              Some
+                                (Adjusting
+                                   {
+                                     wire = w;
+                                     segment;
+                                     vertical;
+                                     grab;
+                                     origin = (mx, my);
+                                     bends = ref (bends_of doc w);
+                                   })
+                        | None -> ());
                         area#misc#queue_draw ()
                     | None ->
                         selection <- None;
@@ -290,7 +440,7 @@ class canvas () = object (self)
             self#refresh ()
         | None -> (
             match self#wire_at mx my with
-            | Some w ->
+            | Some (w, _) ->
                 Doc.disconnect doc ~dst:w.dst ~port:w.port;
                 selection <- None;
                 report "wire deleted";
@@ -301,37 +451,65 @@ class canvas () = object (self)
 
   method private motion ev =
     let mx = GdkEvent.Motion.x ev and my = GdkEvent.Motion.y ev in
+    let dragged_far ox oy = Float.hypot (mx -. ox) (my -. oy) >= 4. in
     (match drag with
-    | Some (Moving (id, ox, oy)) ->
-        Doc.move doc id ~x:(snap (mx -. ox)) ~y:(snap (my -. oy));
-        moved <- true;
+    | Some (Moving d) ->
+        let ox, oy = d.offset in
+        Doc.move doc d.node ~x:(snap (mx -. ox)) ~y:(snap (my -. oy));
+        if dragged_far (fst d.origin) (snd d.origin) then moved <- true;
         area#misc#queue_draw ()
-    | Some (Wiring (src, _, _)) ->
-        drag <- Some (Wiring (src, mx, my));
-        moved <- true;
+    | Some (Wiring d) ->
+        let tx, ty, target = self#wire_target mx my in
+        drag <- Some (Wiring { d with tx; ty; target });
         area#misc#queue_draw ()
-    | None -> ());
+    | Some (Adjusting d) ->
+        if dragged_far (fst d.origin) (snd d.origin) then begin
+          let value = snap (if d.vertical then mx -. d.grab else my -. d.grab) in
+          let bends =
+            List.mapi
+              (fun i (x, y) ->
+                if i = d.segment - 1 || i = d.segment then
+                  if d.vertical then (value, y) else (x, value)
+                else (x, y))
+              !(d.bends)
+          in
+          d.bends := bends;
+          Doc.set_route doc ~dst:d.wire.dst ~port:d.wire.port bends;
+          moved <- true;
+          area#misc#queue_draw ()
+        end
+    | None ->
+        let under = Option.map fst (self#wire_at mx my) in
+        if under <> hover then begin
+          hover <- under;
+          area#misc#queue_draw ()
+        end);
     true
 
-  method private release ev =
-    let mx = GdkEvent.Button.x ev and my = GdkEvent.Button.y ev in
+  method private release _ev =
     (match drag with
-    | Some (Moving (id, _, _)) when not moved -> (
-        match (Doc.node doc id).kind with
+    | Some (Moving d) when not moved -> (
+        match (Doc.node doc d.node).kind with
         | Circuit.Input ->
-            Doc.toggle doc id;
+            Doc.toggle doc d.node;
             report "input toggled";
             self#refresh ()
         | Circuit.Gate _ -> ())
-    | Some (Wiring (src, _, _)) -> (
-        match self#port_at mx my with
-        | Some (In (dst, port)) -> (
-            match Doc.connect ~port doc ~src ~dst with
+    | Some (Wiring d) -> (
+        match d.target with
+        | Some (dst, port) -> (
+            match Doc.connect ~port doc ~src:d.src ~dst with
             | Some _ ->
                 report "wire added";
                 self#refresh ()
             | None -> report "every input port of that gate is wired already")
-        | Some (Out _) | None -> report "a wire has to end on an input port")
+        | None -> report "a wire has to end on an input port")
+    | Some (Adjusting d) ->
+        if moved then begin
+          let bends = normalize !(d.bends) in
+          Doc.set_route doc ~dst:d.wire.dst ~port:d.wire.port bends;
+          report "wire adjusted"
+        end
     | Some (Moving _) | None -> ());
     drag <- None;
     moved <- false;
